@@ -23,7 +23,7 @@ from .table import (
     MODEL_MIT_KP_TABLE,
     MODEL_MIT_KD_TABLE,
 )
-from .protocol import CommunicationType
+from .protocol import CommunicationType, ParameterType
 
 
 Value: TypeAlias = int | float
@@ -489,3 +489,146 @@ class RobstrideBus:
             temperature = temperature
 
         return position, velocity, torque, temperature
+
+    def set_run_mode(self, motor: str, run_mode: int) -> None:
+        """
+        Set the motor's run mode.
+
+        Per the RobStride manual, the mode must be switched while the motor
+        is in the disabled (Reset) state. Callers should `disable` the motor
+        before changing modes if it is currently running.
+
+        Args:
+            motor (str): Motor name registered with the bus.
+            run_mode (int): One of
+                0 = Operation control mode (MIT, default after power-up)
+                1 = Position mode (PP, profile position)
+                2 = Velocity mode
+                3 = Current mode
+                5 = Position mode (CSP, cyclic synchronous position)
+        """
+        assert run_mode in (0, 1, 2, 3, 5), f"Invalid run_mode: {run_mode}"
+        self.write(motor, ParameterType.MODE, run_mode)
+
+    def move_to_position_pp(
+        self,
+        motor: str,
+        position: float,
+        velocity_max: float | None = None,
+        acceleration: float | None = None,
+    ) -> None:
+        """
+        Command the motor to move to a target position using PP (profile
+        position) mode. The motor must already be in run_mode = 1 and enabled.
+
+        Per RobStride manual section 4.3.5, the recommended write order is:
+            vel_max  -> acc_set -> loc_ref
+
+        Args:
+            motor (str): Motor name registered with the bus.
+            position (float): Target absolute position, in rad.
+            velocity_max (float | None): Profile maximum velocity in rad/s.
+                If None, the value previously written to the motor is reused
+                (factory default 10 rad/s).
+            acceleration (float | None): Profile acceleration in rad/s^2.
+                If None, the previously written value is reused (factory
+                default 10 rad/s^2).
+        """
+        if velocity_max is not None:
+            self.write(motor, ParameterType.PP_VELOCITY_MAX, float(velocity_max))
+        if acceleration is not None:
+            self.write(motor, ParameterType.PP_ACCELERATION_TARGET, float(acceleration))
+
+        target = float(position)
+        if self.calibration:
+            calibration = self.calibration[motor]
+            target = target * calibration["direction"] + calibration["homing_offset"]
+
+        self.write(motor, ParameterType.POSITION_TARGET, target)
+
+    def move_to_position_csp(
+        self,
+        motor: str,
+        position: float,
+        velocity_limit: float | None = None,
+    ) -> None:
+        """
+        Command the motor to move to a target position using CSP (cyclic
+        synchronous position) mode. The motor must already be in run_mode = 5
+        and enabled.
+
+        Per RobStride manual section 4.3.4, the recommended write order is:
+            limit_spd -> loc_ref
+
+        Args:
+            motor (str): Motor name registered with the bus.
+            position (float): Target absolute position, in rad.
+            velocity_limit (float | None): Velocity limit in rad/s. If None,
+                the previously written value is reused.
+        """
+        if velocity_limit is not None:
+            self.write(motor, ParameterType.VELOCITY_LIMIT, float(velocity_limit))
+
+        target = float(position)
+        if self.calibration:
+            calibration = self.calibration[motor]
+            target = target * calibration["direction"] + calibration["homing_offset"]
+
+        self.write(motor, ParameterType.POSITION_TARGET, target)
+
+    def set_target_velocity(
+        self,
+        motor: str,
+        velocity: float,
+        acceleration: float | None = None,
+        current_limit: float | None = None,
+    ) -> None:
+        """
+        Command the motor to spin at a target velocity using velocity mode
+        (run_mode = 2). The motor must already be in run_mode = 2 and enabled.
+
+        Per RobStride manual section 4.3.3, the recommended write order is:
+            limit_cur -> acc_rad -> spd_ref
+
+        Args:
+            motor (str): Motor name registered with the bus.
+            velocity (float): Target velocity, in rad/s.
+            acceleration (float | None): Velocity-mode acceleration in
+                rad/s^2. If None, the previously written value is reused
+                (factory default 20 rad/s^2).
+            current_limit (float | None): Phase current limit in A. If None,
+                the previously written value is reused.
+        """
+        if current_limit is not None:
+            self.write(motor, ParameterType.CURRENT_LIMIT, float(current_limit))
+        if acceleration is not None:
+            self.write(motor, ParameterType.VEL_ACCELERATION_TARGET, float(acceleration))
+
+        target = float(velocity)
+        if self.calibration:
+            calibration = self.calibration[motor]
+            target = target * calibration["direction"]
+
+        self.write(motor, ParameterType.VELOCITY_TARGET, target)
+
+    def set_target_current(self, motor: str, iq: float) -> None:
+        """
+        Command the motor to track a target Iq current using current mode
+        (run_mode = 3). The motor must already be in run_mode = 3 and enabled.
+
+        WARNING: under no/low load, even a small Iq will accelerate the motor
+        very quickly because there is no closed-loop velocity feedback in
+        this mode. Always start from low values and write iq=0 before
+        disabling.
+
+        Args:
+            motor (str): Motor name registered with the bus.
+            iq (float): Target Iq current in A. Range -23 ~ +23 A
+                (saturated by `limit_cur` if the latter is smaller).
+        """
+        target = float(iq)
+        if self.calibration:
+            calibration = self.calibration[motor]
+            target = target * calibration["direction"]
+
+        self.write(motor, ParameterType.IQ_TARGET, target)
