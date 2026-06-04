@@ -413,15 +413,19 @@ class RobstrideBus:
         Write the ID of the motor.
         """
         device_id = self.motors[motor].id
-        self.transmit(CommunicationType.SET_CAN_ID, new_id, device_id)
+        # Type-7 ID change uses the 16-bit extra field as:
+        # high byte = new actuator ID, low byte = host ID.
+        extra_data = (new_id << 8) | self.host_id
+        self.transmit(CommunicationType.SET_DEVICE_ID, extra_data, device_id)
         response = self.receive()
         if not response:
             return None
-        communication_type, device_id, check, uuid = response
-        print(f"new ID: {device_id}, UUID: {uuid}")
+        communication_type, extra_data, host_id, uuid = response
+        new_device_id = (extra_data >> 8) & 0xFF
+        print(f"new ID: {new_device_id}, UUID: {uuid}")
 
         self.motors[motor].id = new_id
-        return device_id, uuid
+        return new_device_id, uuid
 
     def write_operation_frame(
         self,
